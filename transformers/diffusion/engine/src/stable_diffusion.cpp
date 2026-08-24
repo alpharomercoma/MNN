@@ -68,9 +68,9 @@ bool StableDiffusion::load() {
     // module_config.rearrange = true;
     runtime_manager_.reset(Executor::RuntimeManager::createRuntimeManager(config));
     
+    std::string cacheFilePath = mModelPath + "/.cl_cache";
     if (config.type == MNN_FORWARD_OPENCL) {
-        const char* cacheFileName = ".tempcache";
-        runtime_manager_->setCache(cacheFileName);
+        runtime_manager_->setCache(cacheFilePath.c_str());
     }
     // need to consider memory
     if(mMemoryMode == 0) {

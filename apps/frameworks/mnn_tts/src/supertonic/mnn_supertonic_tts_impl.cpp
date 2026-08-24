@@ -374,6 +374,11 @@ MNNSupertonicTTSImpl::MNNSupertonicTTSImpl(
   std::ifstream config_file(config_path);
   if (!config_file.is_open())
   {
+    config_path = models_dir_ + "/tts.json";
+    config_file.open(config_path);
+  }
+  if (!config_file.is_open())
+  {
     PLOG(ERROR, "Failed to open config file: " + config_path);
     throw std::runtime_error("Failed to open config file: " + config_path);
   }
@@ -430,6 +435,12 @@ MNNSupertonicTTSImpl::MNNSupertonicTTSImpl(
 
   // Initialize text processor
   std::string indexer_path = models_dir_ + "/mnn_models/unicode_indexer.json";
+  {
+    std::ifstream idx_check(indexer_path);
+    if (!idx_check.good()) {
+      indexer_path = models_dir_ + "/unicode_indexer.json";
+    }
+  }
   text_processor_ = std::make_unique<TextProcessor>(indexer_path);
 
   // Initialize MNN inference engine
@@ -459,11 +470,21 @@ void MNNSupertonicTTSImpl::loadVoiceStyle(const std::string &voice_name)
   {
     std::string style_path =
         models_dir_ + "/mnn_models/voice_styles/" + voice_name + ".json";
-    // Check if file exists, if not try old path structure
+    // Check if file exists, if not try fallback path structures
     std::ifstream f_check(style_path);
     if (!f_check.good())
     {
       style_path = models_dir_ + "/voice_styles/" + voice_name + ".json";
+      f_check.open(style_path);
+      if (!f_check.good()) {
+        std::string lower_name = voice_name;
+        std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), ::tolower);
+        style_path = models_dir_ + "/voice_" + lower_name + ".json";
+        f_check.open(style_path);
+        if (!f_check.good()) {
+          style_path = models_dir_ + "/" + voice_name + ".json";
+        }
+      }
     }
     f_check.close();
 
@@ -929,6 +950,12 @@ void MNNSupertonicTTSImpl::initializeModels()
   {
     std::string path =
         models_dir_ + "/mnn_models/" + precision_dir_ + "/" + filename;
+    {
+      std::ifstream m_check(path);
+      if (!m_check.good()) {
+        path = models_dir_ + "/" + filename;
+      }
+    }
     std::vector<std::string> inputs,
         outputs; // Empty for auto-detection or not needed for load
     auto module = std::shared_ptr<MNN::Express::Module>(
