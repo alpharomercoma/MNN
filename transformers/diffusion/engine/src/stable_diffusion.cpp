@@ -56,7 +56,7 @@ bool StableDiffusion::load() {
         config.numThread = 1;
     }
     backendConfig.memory = BackendConfig::Memory_Low;
-    backendConfig.precision = BackendConfig::Precision_Low;
+    backendConfig.precision = BackendConfig::Precision_High;
     config.backendConfig = &backendConfig;
     
     auto exe = ExecutorScope::Current();
@@ -189,8 +189,19 @@ VARP StableDiffusion::text_encoder(const std::vector<int>& ids) {
     memcpy((void *)mPromptVar->writeMap<int8_t>(), ids.data(), 2*mMaxTextLen*sizeof(int));
 
     auto outputs = forwardWithResizeCache(0, {mPromptVar});
-    auto output = _Convert(outputs[0], NCHW);
+    auto output = outputs[0];
     output.fix(VARP::CONSTANT);
+    auto tInfo = output->getInfo();
+    auto tPtr = output->readMap<float>();
+    if (tInfo && tPtr) {
+        int tSize = 1;
+        for (int d : tInfo->dim) tSize *= d;
+        std::vector<float> tData(tPtr, tPtr + tSize);
+        MNN_PRINT("text_encoder dim: [");
+        for (int d : tInfo->dim) MNN_PRINT("%d, ", d);
+        MNN_PRINT("] sample: [%f, %f, %f, %f]\n", tData[0], tData[1], tData[2], tData[3]);
+        output = _Const(tData.data(), tInfo->dim, tInfo->order, halide_type_of<float>());
+    }
     return output;
 }
 
@@ -204,14 +215,34 @@ VARP StableDiffusion::step_plms(VARP sample, VARP model_output, int index) {
         if (mEts.size() >= 4) {
             mEts[mEts.size() - 4] = nullptr;
         }
-        mEts.push_back(model_output);
+        model_output.fix(VARP::CONSTANT);
+        auto mInfo = model_output->getInfo();
+        auto mPtr = model_output->readMap<float>();
+        if (mInfo && mPtr) {
+            int mSize = 1;
+            for (int d : mInfo->dim) mSize *= d;
+            std::vector<float> mData(mPtr, mPtr + mSize);
+            mEts.push_back(_Const(mData.data(), mInfo->dim, mInfo->order, halide_type_of<float>()));
+        } else {
+            mEts.push_back(model_output);
+        }
     } else {
         timestep = mTimeSteps[0];
         prev_timestep = mTimeSteps[1];
     }
     int ets = mEts.size() - 1;
     if (index == 0) {
-        mSample = sample;
+        sample.fix(VARP::CONSTANT);
+        auto sInfo = sample->getInfo();
+        auto sPtr = sample->readMap<float>();
+        if (sInfo && sPtr) {
+            int sSize = 1;
+            for (int d : sInfo->dim) sSize *= d;
+            std::vector<float> sData(sPtr, sPtr + sSize);
+            mSample = _Const(sData.data(), sInfo->dim, sInfo->order, halide_type_of<float>());
+        } else {
+            mSample = sample;
+        }
     } else if (index == 1) {
         model_output = (model_output + mEts[ets]) * _Const(0.5);
         sample = mSample;
@@ -289,6 +320,20 @@ VARP StableDiffusion::unet(VARP text_embeddings, int iterNum, int randomSeed, st
 
         plms = step_plms(plms, noise_pred, i);
 
+        // Materialize plms to a standalone constant tensor to prevent graph accumulation
+        plms.fix(VARP::CONSTANT);
+        auto pInfo = plms->getInfo();
+        auto pPtr = plms->readMap<float>();
+        if (pInfo && pPtr) {
+            int pSize = 1;
+            for (int d : pInfo->dim) pSize *= d;
+            std::vector<float> pData(pPtr, pPtr + pSize);
+            plms = _Const(pData.data(), pInfo->dim, pInfo->order, halide_type_of<float>());
+            if (i == 0 || i == mTimeSteps.size() - 1) {
+                MNN_PRINT("SD step %d plms: [%f, %f, %f, %f]\n", i + 1, pData[0], pData[1], pData[2], pData[3]);
+            }
+        }
+
         if (progressCallback) {
             progressCallback((2 + i) * 100 / (iterNum + 3)); // percent
         }
@@ -301,16 +346,39 @@ VARP StableDiffusion::vae_decoder(VARP latent) {
     if(mMemoryMode != 1) {
         mModules[1].reset();
     }
-    latent = latent * _Const(1 / 0.18215);
+    latent = latent * _Const(1.0f / 0.18215f);
+    latent.fix(VARP::CONSTANT);
+    auto lInfo = latent->getInfo();
+    auto lPtr = latent->readMap<float>();
+    if (lInfo && lPtr) {
+        int lSize = 1;
+        for (int d : lInfo->dim) lSize *= d;
+        std::vector<float> lData(lPtr, lPtr + lSize);
+        MNN_PRINT("vae_decoder latent dim: [");
+        for (int d : lInfo->dim) MNN_PRINT("%d, ", d);
+        MNN_PRINT("] sample: [%f, %f, %f, %f]\n", lData[0], lData[1], lData[2], lData[3]);
+        latent = _Const(lData.data(), lInfo->dim, lInfo->order, halide_type_of<float>());
+    }
     
     AUTOTIME;
     auto outputs = forwardWithResizeCache(2, {latent});
-    auto output = _Convert(outputs[0], NCHW);
+    auto output = outputs[0];
+    output = _Convert(output, NCHW);
+    output.fix(VARP::CONSTANT);
+    auto oInfo = output->getInfo();
+    auto oPtr = output->readMap<float>();
+    if (oInfo && oPtr) {
+        int oSize = 1;
+        for (int d : oInfo->dim) oSize *= d;
+        MNN_PRINT("vae_decoder output dim: [");
+        for (int d : oInfo->dim) MNN_PRINT("%d, ", d);
+        MNN_PRINT("] sample: [%f, %f, %f, %f]\n", oPtr[0], oPtr[1], oPtr[2], oPtr[3]);
+    }
 
     auto image = output;
-    image = _Relu6(image * _Const(0.5) + _Const(0.5), 0, 1);
-    image = _Squeeze(_Transpose(image, {0, 2, 3, 1}));
-    image = _Cast(_Round(image * _Const(255.0)), halide_type_of<uint8_t>());
+    image = _Relu6(image * _Const(0.5f) + _Const(0.5f), 0.0f, 1.0f);
+    image = _Squeeze(_Transpose(image, {0, 2, 3, 1}), {0});
+    image = _Cast(_Round(image * _Const(255.0f)), halide_type_of<uint8_t>());
     image = cvtColor(image, COLOR_BGR2RGB);
     image.fix(VARP::CONSTANT);
     return image;

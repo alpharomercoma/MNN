@@ -60,6 +60,7 @@ namespace MNN
             else if (config.type == MNN_FORWARD_OPENCL)
             {
                 config.mode = MNN_GPU_MEMORY_BUFFER | MNN_GPU_TUNING_FAST;
+                backendConfig.precision = BackendConfig::Precision_High;
             }
             else if (config.type == MNN_FORWARD_METAL)
             {
@@ -152,16 +153,46 @@ namespace MNN
         {
             AUTOTIME;
 
+            {
+                auto lInfo = latent->getInfo();
+                auto pLat = latent->readMap<float>();
+                if (lInfo && pLat) {
+                    MNN_PRINT("VAE input shape: [%d, %d, %d, %d], lat[0]=%f, lat[10]=%f\n",
+                        lInfo->dim.size() > 0 ? lInfo->dim[0] : 0,
+                        lInfo->dim.size() > 1 ? lInfo->dim[1] : 0,
+                        lInfo->dim.size() > 2 ? lInfo->dim[2] : 0,
+                        lInfo->dim.size() > 3 ? lInfo->dim[3] : 0,
+                        pLat[0], pLat[10]);
+                }
+            }
+
             // 反归一化latent (scaling_factor = 0.41407)
             latent = latent / _Const(0.41407f);
 
             auto outputs = mModules[3]->onForward({latent});
+            if (outputs.empty() || outputs[0].get() == nullptr) {
+                MNN_ERROR("VAE decoder returned null outputs!\n");
+                return nullptr;
+            }
             auto output = _Convert(outputs[0], NCHW);
+
+            {
+                auto pOut = output->readMap<float>();
+                auto oInfo = output->getInfo();
+                if (oInfo && pOut) {
+                    MNN_PRINT("VAE output shape: [%d, %d, %d, %d], out[0]=%f, out[10]=%f, out[100]=%f\n",
+                        oInfo->dim.size() > 0 ? oInfo->dim[0] : 0,
+                        oInfo->dim.size() > 1 ? oInfo->dim[1] : 0,
+                        oInfo->dim.size() > 2 ? oInfo->dim[2] : 0,
+                        oInfo->dim.size() > 3 ? oInfo->dim[3] : 0,
+                        pOut[0], pOut[10], pOut[100]);
+                }
+            }
 
             // 后处理：归一化到[0,1]并转换为uint8图像
             auto image = output;
             image = _Minimum(_Maximum(image * _Const(0.5f) + _Const(0.5f), _Const(0.0f)), _Const(1.0f));
-            image = _Squeeze(_Transpose(image, {0, 2, 3, 1}));
+            image = _Squeeze(_Transpose(image, {0, 2, 3, 1}), {0});
             image = _Cast(_Round(image * _Const(255.0f)), halide_type_of<uint8_t>());
             image = cvtColor(image, COLOR_BGR2RGB);
 
@@ -373,22 +404,38 @@ namespace MNN
             // Connector: 初步转换LLM特征
             MNN_PRINT("Running Connector...\n");
             auto connector_res = mModules[0]->onForward({llm_out});
-            auto connector_out = connector_res[0];
-
-            if (mMemoryMode != 1)
+            if (connector_res.empty() || connector_res[0].get() == nullptr)
             {
-                ((MNN::Tensor *)(connector_out->getTensor()))->wait(Tensor::MAP_TENSOR_READ, true);
-                mModules[0].reset();
+                MNN_ERROR("Error: Connector returned null\n");
+                return false;
             }
+            auto connector_out = connector_res[0];
 
             // Projector: 投影到Diffusion特征空间
             MNN_PRINT("Running Projector...\n");
             auto projector_res = mModules[1]->onForward({connector_out});
+            if (projector_res.empty() || projector_res[0].get() == nullptr)
+            {
+                MNN_ERROR("Error: Projector returned null\n");
+                return false;
+            }
             auto prompt_embeds = projector_res[0];
+
+            // Materialize prompt_embeds to a standalone constant so modules 0 and 1 can be safely freed
+            {
+                auto pInfo = prompt_embeds->getInfo();
+                auto pPtr = prompt_embeds->readMap<float>();
+                if (pInfo && pPtr) {
+                    int pSize = 1;
+                    for (int d : pInfo->dim) pSize *= d;
+                    std::vector<float> pData(pPtr, pPtr + pSize);
+                    prompt_embeds = _Const(pData.data(), pInfo->dim, pInfo->order, halide_type_of<float>());
+                }
+            }
 
             if (mMemoryMode != 1)
             {
-                ((MNN::Tensor *)(prompt_embeds->getTensor()))->wait(Tensor::MAP_TENSOR_READ, true);
+                mModules[0].reset();
                 mModules[1].reset();
             }
 
@@ -455,13 +502,19 @@ namespace MNN
             for (size_t i = 0; i < noise.size(); ++i)
                 noise[i] = normal(rng);
 
-            VARP latents = _Input({1, latent_channels, latent_h, latent_w}, NCHW, halide_type_of<float>());
-            memcpy(latents->writeMap<float>(), noise.data(), noise.size() * sizeof(float));
+            VARP latents = _Const(noise.data(), {1, latent_channels, latent_h, latent_w}, NCHW, halide_type_of<float>());
 
             // CFG模式需要批处理latents
             if (use_cfg)
             {
                 latents = _Concat({latents, latents}, 0); // [2, 32, 16, 16]
+                latents.fix(VARP::CONSTANT);
+                auto lInfo = latents->getInfo();
+                auto lPtr = latents->readMap<float>();
+                int lSize = 1;
+                for (int d : lInfo->dim) lSize *= d;
+                std::vector<float> lData(lPtr, lPtr + lSize);
+                latents = _Const(lData.data(), lInfo->dim, lInfo->order, halide_type_of<float>());
                 MNN_PRINT("Batched latents for CFG: [2, %d, %d, %d]\n", latent_channels, latent_h, latent_w);
             }
 
@@ -534,9 +587,8 @@ namespace MNN
 
             // Attention mask：根据batch_size调整
             int mask_batch = use_cfg ? 2 : 1;
-            VARP encoder_attention_mask = _Input({mask_batch, seq_len}, NCHW, halide_type_of<float>());
-            std::fill(encoder_attention_mask->writeMap<float>(),
-                      encoder_attention_mask->writeMap<float>() + mask_batch * seq_len, 1.0f);
+            std::vector<float> mask_data(mask_batch * seq_len, 1.0f);
+            VARP encoder_attention_mask = _Const(mask_data.data(), {mask_batch, seq_len}, NCHW, halide_type_of<float>());
 
             for (int i = 0; i < num_inference_steps; ++i)
             {
@@ -547,15 +599,22 @@ namespace MNN
                 MNN_PRINT("Step %d/%d: t=%f\n", i + 1, num_inference_steps, t);
 
                 // Timestep：根据batch_size调整
-                VARP timestep_var = _Input({mask_batch}, NCHW, halide_type_of<float>());
-                auto t_ptr = timestep_var->writeMap<float>();
-                for (int b = 0; b < mask_batch; ++b)
-                {
-                    t_ptr[b] = (float)t;
+                std::vector<float> t_data(mask_batch, (float)t);
+                VARP timestep_var = _Const(t_data.data(), {mask_batch}, NCHW, halide_type_of<float>());
+
+                if (i == 0) {
+                    auto sP = sample->readMap<float>();
+                    auto pP = prompt_embeds->readMap<float>();
+                    auto rP = ref_latents_batched->readMap<float>();
+                    MNN_PRINT("Step 1 inputs: sample[0]=%f, prompt[0]=%f, time=%f, mask[0]=%f, ref[0]=%f\n",
+                        sP ? sP[0] : -999.0f,
+                        pP ? pP[0] : -999.0f,
+                        (float)t,
+                        mask_data[0],
+                        rP ? rP[0] : -999.0f);
                 }
 
                 // DiT Transformer推理：预测噪声
-
                 auto res = mModules[2]->onForward({sample, prompt_embeds, timestep_var, encoder_attention_mask, ref_latents_batched});
 
                 if (res.empty())
@@ -571,6 +630,12 @@ namespace MNN
                 }
 
                 auto noise_pred = _Convert(res[0], NCHW);
+                {
+                    auto nPtr = noise_pred->readMap<float>();
+                    if (nPtr) {
+                        MNN_PRINT("Step %d noise_pred: [%f, %f, %f, %f]\n", i + 1, nPtr[0], nPtr[1], nPtr[2], nPtr[3]);
+                    }
+                }
 
                 // 应用CFG（Classifier-Free Guidance）
                 VARP noise_pred_guided;
@@ -602,12 +667,29 @@ namespace MNN
 
                 sample = sample + noise_pred_guided * _Const(dt / 1000.0f);
 
+                // Materialize sample to prevent graph accumulation and OpenCL buffer aliasing
+                sample.fix(VARP::CONSTANT);
+                auto sInfo = sample->getInfo();
+                auto sPtr = sample->readMap<float>();
+                if (sInfo && sPtr) {
+                    int sSize = 1;
+                    for (int d : sInfo->dim) sSize *= d;
+                    std::vector<float> sData(sPtr, sPtr + sSize);
+                    sample = _Const(sData.data(), sInfo->dim, sInfo->order, halide_type_of<float>());
+                    MNN_PRINT("Step %d sample: [%f, %f, %f, %f]\n", i + 1, sData[0], sData[1], sData[2], sData[3]);
+                }
+
                 // CFG模式：保持batch维度一致
                 if (use_cfg)
                 {
                     auto sample_split = _Split(sample, {2}, 0);
                     sample = sample_split[0];
                     sample = _Concat({sample, sample}, 0);
+                }
+
+                if (progressCallback)
+                {
+                    progressCallback(i + 1);
                 }
             }
 
@@ -646,7 +728,7 @@ namespace MNN
                 mModules[3].reset();
             }
 
-            return true;
+            return success;
         }
 
     } // namespace DIFFUSION

@@ -305,11 +305,18 @@ public:
         auto splits = _Split(output, {total_len - num_queries, num_queries}, 1); 
         // splits[0] is text part, splits[1] is query part.
         
-#if FREE_LLM_INSTANCE
-        ((MNN::Tensor*)(splits[1]->getTensor()))->wait(Tensor::MAP_TENSOR_READ, true);
-        mLlm.reset();
-#endif
-        return splits[1];
+        auto query_var = splits[1];
+        auto qInfo = query_var->getInfo();
+        auto qPtr = query_var->readMap<float>();
+        if (!qPtr || !qInfo) {
+            return nullptr;
+        }
+        int qSize = 1;
+        for (int d : qInfo->dim) {
+            qSize *= d;
+        }
+        std::vector<float> copied(qPtr, qPtr + qSize);
+        return _Const(copied.data(), qInfo->dim, qInfo->order, halide_type_of<float>());
     }
 
 private:

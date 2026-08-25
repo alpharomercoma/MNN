@@ -59,8 +59,9 @@ std::vector<int> MtokTokenizer::encodeSingle(const std::string& sentence, int ma
                 ids[maxlen - 1] = mEosId;
             }
         } else {
+            int padToken = mEosId >= 0 ? mEosId : 0;
             while ((int)ids.size() < maxlen) {
-                ids.push_back(0);
+                ids.push_back(padToken);
             }
         }
     }
@@ -75,7 +76,8 @@ std::vector<int> MtokTokenizer::encodeSingle(const std::string& sentence, int ma
 std::vector<int> MtokTokenizer::encode(const std::string& sentence, int maxlen) {
 #if defined(MNN_DIFFUSION_WITH_LLM_TOKENIZER)
     if (mStyle == Style::kPair) {
-        std::vector<int> ids(maxlen * 2, 0);
+        int padToken = mEosId >= 0 ? mEosId : 0;
+        std::vector<int> ids(maxlen * 2, padToken);
         auto uncond = encodeSingle("", maxlen);
         auto cond = encodeSingle(sentence, maxlen);
         std::copy(uncond.begin(), uncond.end(), ids.begin());
