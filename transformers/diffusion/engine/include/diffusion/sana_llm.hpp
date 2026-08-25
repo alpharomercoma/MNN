@@ -289,9 +289,23 @@ public:
         mLlm->setKVCacheInfo(batch*total_len, 0);
         auto outputs = mLlm->forwardRaw(full_embeds, attention_mask, position_ids);
         if(outputs.empty()) {
+            MNN_ERROR("Error: mLlm->forwardRaw returned empty outputs\n");
             return nullptr;
         }
+        MNN_PRINT("LLM forwardRaw returned %zu outputs\n", outputs.size());
+        for (size_t oi = 0; oi < outputs.size(); ++oi) {
+            auto info = outputs[oi]->getInfo();
+            if (info) {
+                MNN_PRINT("  output[%zu] shape: [", oi);
+                for (size_t di = 0; di < info->dim.size(); ++di) {
+                    MNN_PRINT("%d%s", info->dim[di], di + 1 < info->dim.size() ? ", " : "");
+                }
+                auto ptr = outputs[oi]->readMap<float>();
+                MNN_PRINT("], ptr[0]=%f\n", ptr ? ptr[0] : -999.0f);
+            }
+        }
         int hiddenStateIndex = mLlm->getOutputIndex("hidden_states");
+        MNN_PRINT("hiddenStateIndex from getOutputIndex: %d\n", hiddenStateIndex);
         hiddenStateIndex = hiddenStateIndex == -1 ? outputs.size() - 1 : hiddenStateIndex;
 
         // Get hidden_states ouptput
@@ -311,6 +325,11 @@ public:
         if (!qPtr || !qInfo) {
             return nullptr;
         }
+        MNN_PRINT("SanaLlm query_var shape: [%d, %d, %d], qPtr[0]=%f, qPtr[100]=%f\n",
+            qInfo->dim.size() > 0 ? qInfo->dim[0] : 0,
+            qInfo->dim.size() > 1 ? qInfo->dim[1] : 0,
+            qInfo->dim.size() > 2 ? qInfo->dim[2] : 0,
+            qPtr[0], qPtr[100]);
         int qSize = 1;
         for (int d : qInfo->dim) {
             qSize *= d;

@@ -180,12 +180,19 @@ namespace MNN
                 auto pOut = output->readMap<float>();
                 auto oInfo = output->getInfo();
                 if (oInfo && pOut) {
-                    MNN_PRINT("VAE output shape: [%d, %d, %d, %d], out[0]=%f, out[10]=%f, out[100]=%f\n",
+                    float minV = pOut[0], maxV = pOut[0];
+                    int totalPix = 1;
+                    for (int d : oInfo->dim) totalPix *= d;
+                    for (int pi = 0; pi < totalPix; ++pi) {
+                        if (pOut[pi] < minV) minV = pOut[pi];
+                        if (pOut[pi] > maxV) maxV = pOut[pi];
+                    }
+                    MNN_PRINT("VAE output shape: [%d, %d, %d, %d], min=%f, max=%f, out[0]=%f, out[10]=%f, out[100]=%f\n",
                         oInfo->dim.size() > 0 ? oInfo->dim[0] : 0,
                         oInfo->dim.size() > 1 ? oInfo->dim[1] : 0,
                         oInfo->dim.size() > 2 ? oInfo->dim[2] : 0,
                         oInfo->dim.size() > 3 ? oInfo->dim[3] : 0,
-                        pOut[0], pOut[10], pOut[100]);
+                        minV, maxV, pOut[0], pOut[10], pOut[100]);
                 }
             }
 
@@ -465,7 +472,7 @@ namespace MNN
 
                 // Reorder embeddings for CFG: [Neg, Pos]
                 // Input order from LLM is [Pos, Neg], we need to swap
-                auto split_res = _Split(prompt_embeds, {2}, 0);
+                auto split_res = _Split(prompt_embeds, {1, 1}, 0);
                 auto prompt_embeds_pos = split_res[0]; // First is positive
                 auto prompt_embeds_neg = split_res[1]; // Second is negative
 
@@ -477,7 +484,7 @@ namespace MNN
                 if (batch_size == 2)
                 {
                     MNN_PRINT("Warning: batch_size=2 but use_cfg=false, using only first prompt.\n");
-                    auto split_res = _Split(prompt_embeds, {2}, 0);
+                    auto split_res = _Split(prompt_embeds, {1, 1}, 0);
                     prompt_embeds = split_res[0]; // Use only positive prompt
                     batch_size = 1;
                     seq_len = prompt_embeds->getInfo()->dim[1];
@@ -642,9 +649,15 @@ namespace MNN
                 if (use_cfg)
                 {
                     // 分离条件和无条件预测
-                    auto split_res = _Split(noise_pred, {2}, 0);
+                    auto split_res = _Split(noise_pred, {1, 1}, 0);
                     auto noise_pred_uncond = split_res[0]; // 负样本（无条件）
                     auto noise_pred_text = split_res[1];   // 正样本（有条件）
+
+                    auto uPtr = noise_pred_uncond->readMap<float>();
+                    auto tPtr = noise_pred_text->readMap<float>();
+                    if (uPtr && tPtr) {
+                        MNN_PRINT("Step %d uncond[0]=%f, text[0]=%f, diff=%f\n", i + 1, uPtr[0], tPtr[0], tPtr[0] - uPtr[0]);
+                    }
 
                     // CFG公式：guided = uncond + scale * (cond - uncond)
                     noise_pred_guided = noise_pred_uncond + (noise_pred_text - noise_pred_uncond) * _Const(cfg_scale);
@@ -682,7 +695,7 @@ namespace MNN
                 // CFG模式：保持batch维度一致
                 if (use_cfg)
                 {
-                    auto sample_split = _Split(sample, {2}, 0);
+                    auto sample_split = _Split(sample, {1, 1}, 0);
                     sample = sample_split[0];
                     sample = _Concat({sample, sample}, 0);
                 }
@@ -703,7 +716,7 @@ namespace MNN
             VARP final_latents;
             if (use_cfg)
             {
-                auto final_split = _Split(sample, {2}, 0);
+                auto final_split = _Split(sample, {1, 1}, 0);
                 final_latents = final_split[0];
             }
             else

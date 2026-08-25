@@ -135,7 +135,7 @@ bool StableDiffusion::load() {
     // text encoder
     {
         auto outputs = forwardWithResizeCache(0, {mPromptVar});
-        text_embeddings = _Convert(outputs[0], NCHW);
+        text_embeddings = outputs[0];
         text_embeddings.fix(VARP::CONSTANT);
     }
 
@@ -212,9 +212,6 @@ VARP StableDiffusion::step_plms(VARP sample, VARP model_output, int index) {
         prev_timestep = mTimeSteps[index + 1];
     }
     if (index != 1) {
-        if (mEts.size() >= 4) {
-            mEts[mEts.size() - 4] = nullptr;
-        }
         model_output.fix(VARP::CONSTANT);
         auto mInfo = model_output->getInfo();
         auto mPtr = model_output->readMap<float>();
@@ -290,10 +287,6 @@ VARP StableDiffusion::unet(VARP text_embeddings, int iterNum, int randomSeed, st
 
     memcpy((void *)mLatentVar->writeMap<int8_t>(), mInitNoise.data(), 16384*sizeof(float));
     
-    VARP scalevar = _Input({1}, NCHW, halide_type_of<float>());
-    auto scaleptr = scalevar->writeMap<float>();
-    scaleptr[0] = 7.5;
-
     auto floatVar = _Input({1}, NCHW, halide_type_of<float>());
     auto ptr = floatVar->writeMap<float>();
     auto plms = mLatentVar;
@@ -312,11 +305,11 @@ VARP StableDiffusion::unet(VARP text_embeddings, int iterNum, int randomSeed, st
 
         auto noise_pred = output;
 
-        auto splitvar = _Split(noise_pred, {2}, 0);
+        auto splitvar = _Split(noise_pred, {1, 1}, 0);
         auto noise_pred_uncond = splitvar[0];
         auto noise_pred_text = splitvar[1];
 
-        noise_pred = scalevar * (noise_pred_text - noise_pred_uncond) + noise_pred_uncond;
+        noise_pred = _Const(7.5f) * (noise_pred_text - noise_pred_uncond) + noise_pred_uncond;
 
         plms = step_plms(plms, noise_pred, i);
 
