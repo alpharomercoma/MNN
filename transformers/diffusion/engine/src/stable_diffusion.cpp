@@ -362,7 +362,7 @@ VARP StableDiffusion::unet(VARP text_embeddings, int iterNum, int randomSeed, st
         }
 
         if (progressCallback) {
-            progressCallback((2 + i) * 100 / (iterNum + 3)); // percent
+            progressCallback(i + 1); // completed denoising steps, out of iterNum
         }
     }
     plms.fix(VARP::CONSTANT);
@@ -433,9 +433,6 @@ bool StableDiffusion::run(const std::string prompt, const std::string imagePath,
 
     auto text_embeddings = text_encoder(ids);
 
-    if (progressCallback) {
-        progressCallback(1 * 100 / (iterNum + 3)); // percent
-    }
     auto latent = unet(text_embeddings, iterNum, randomSeed, progressCallback);
 
     auto image = vae_decoder(latent);
@@ -447,10 +444,7 @@ bool StableDiffusion::run(const std::string prompt, const std::string imagePath,
     if(mMemoryMode != 1) {
         mModules[2].reset();
     }
-    
-    if (progressCallback) {
-        progressCallback(100); // percent
-    }
+
     return true;
 }
 
