@@ -752,6 +752,10 @@ namespace MNN
             }
 
             // ========== 步骤7: VAE解码 ==========
+            if (::getenv("SANA_VAE_ZERO_LATENT_DEBUG")) {
+                MNN_PRINT("DEBUG: bypassing denoise loop, decoding an all-zero latent to isolate the VAE decoder\n");
+                final_latents = _Const(0.0f, {1, latent_channels, latent_h, latent_w}, NCHW);
+            }
             MNN_PRINT("Running VAE Decoder...\n");
             VARP image = vae_decoder(final_latents);
             image.fix(VARP::CONSTANT);
