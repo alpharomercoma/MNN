@@ -1,6 +1,7 @@
 #include <random>
 #include <fstream>
 #include <chrono>
+#include <cmath>
 #include "diffusion/stable_diffusion.hpp"
 #include "tokenizer.hpp"
 #include "scheduler.hpp"
@@ -164,22 +165,18 @@ std::vector<VARP> StableDiffusion::forwardWithResizeCache(int index, const std::
         MNN_ERROR("Invalid diffusion module index: %d\n", index);
         return {};
     }
-    if (mResizeCachePrepared.size() != mModules.size()) {
-        mResizeCachePrepared.assign(mModules.size(), false);
-    }
-    if (!mResizeCachePrepared[index]) {
-        auto code = mModules[index]->traceOrOptimize(MNN::Interpreter::Session_Resize_Check);
-        if (code != 0) {
-            MNN_PRINT("Resize check is not supported for diffusion module %d, code = %d\n", index, code);
-        } else {
-            mModules[index]->onForward(inputs);
-            code = mModules[index]->traceOrOptimize(MNN::Interpreter::Session_Resize_Fix);
-            if (code != 0) {
-                MNN_PRINT("Resize fix is not supported for diffusion module %d, code = %d\n", index, code);
-            }
-        }
-        mResizeCachePrepared[index] = true;
-    }
+    // This used to call Module::traceOrOptimize(Session_Resize_Check) once, run a warmup
+    // onForward, then traceOrOptimize(Session_Resize_Fix) to lock in a cached execution plan for
+    // every later call — a real MNN Module API feature, meant for exactly this repeated-shape
+    // loop. On the OpenCL backend it does not work for this UNet: once the plan was fixed during
+    // load()'s warmup pass, every subsequent onForward() silently kept returning the warmup-time
+    // output regardless of the real (per-step-changing) latent/timestep passed in — confirmed by
+    // dumping noise_pred stats, which were bit-identical across all 20 denoising steps. Since
+    // step_plms() combines these frozen predictions with per-step coefficients that do change
+    // correctly, the PLMS latent diverged (~25x growth over 20 steps) and the VAE decoded a
+    // saturated, near-uniform image. Skipping the cache and always calling onForward() directly
+    // fixes it: noise_pred now varies every step, its magnitude shrinks over the run as expected
+    // (meanAbs ~0.80 -> ~0.09 across 4 steps), and the final latent stays in a healthy range.
     return mModules[index]->onForward(inputs);
 }
 
@@ -309,7 +306,44 @@ VARP StableDiffusion::unet(VARP text_embeddings, int iterNum, int randomSeed, st
         auto noise_pred_uncond = splitvar[0];
         auto noise_pred_text = splitvar[1];
 
+        if (i < 3 || i == mTimeSteps.size() - 1) {
+            auto dumpStats = [&](const char* label, VARP v) {
+                v.fix(VARP::CONSTANT);
+                auto info = v->getInfo();
+                auto ptr2 = v->readMap<float>();
+                if (!info || !ptr2) { MNN_PRINT("  %s: <no data>\n", label); return; }
+                int n = 1;
+                for (int d : info->dim) n *= d;
+                float mn = ptr2[0], mx = ptr2[0], sumAbs = 0;
+                for (int k = 0; k < n; ++k) {
+                    if (ptr2[k] < mn) mn = ptr2[k];
+                    if (ptr2[k] > mx) mx = ptr2[k];
+                    sumAbs += std::fabs(ptr2[k]);
+                }
+                MNN_PRINT("  %s: n=%d min=%f max=%f meanAbs=%f\n", label, n, mn, mx, sumAbs / n);
+            };
+            MNN_PRINT("SD step %d raw UNet stats:\n", i + 1);
+            dumpStats("noise_pred_uncond", noise_pred_uncond);
+            dumpStats("noise_pred_text", noise_pred_text);
+        }
+
         noise_pred = _Const(7.5f) * (noise_pred_text - noise_pred_uncond) + noise_pred_uncond;
+
+        if (i < 3 || i == mTimeSteps.size() - 1) {
+            auto info = noise_pred->getInfo();
+            auto ptr2 = noise_pred->readMap<float>();
+            if (info && ptr2) {
+                int n = 1;
+                for (int d : info->dim) n *= d;
+                float mn = ptr2[0], mx = ptr2[0], sumAbs = 0;
+                for (int k = 0; k < n; ++k) {
+                    if (ptr2[k] < mn) mn = ptr2[k];
+                    if (ptr2[k] > mx) mx = ptr2[k];
+                    sumAbs += std::fabs(ptr2[k]);
+                }
+                MNN_PRINT("  noise_pred (post-CFG): n=%d min=%f max=%f meanAbs=%f\n", n, mn, mx, sumAbs / n);
+            }
+        }
 
         plms = step_plms(plms, noise_pred, i);
 
