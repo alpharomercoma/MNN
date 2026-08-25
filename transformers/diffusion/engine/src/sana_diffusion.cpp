@@ -404,9 +404,29 @@ namespace MNN
                 MNN_PRINT("Text-to-image mode: no reference image needed.\n");
             }
 
+            // DEBUG: report mean-abs-diff between batch 0 (pos) and batch 1 (neg) for a [2, ...] tensor.
+            auto debugBatchDivergence = [](const char* label, VARP t) {
+                auto info = t->getInfo();
+                auto ptr = t->readMap<float>();
+                if (!info || !ptr || info->dim.empty() || info->dim[0] != 2) return;
+                int size = 1;
+                for (int d : info->dim) size *= d;
+                int perBatch = size / 2;
+                double sumAbsDiff = 0.0, sumAbsPos = 0.0;
+                for (int k = 0; k < perBatch; ++k) {
+                    double d = (double)ptr[k] - (double)ptr[perBatch + k];
+                    sumAbsDiff += std::fabs(d);
+                    sumAbsPos += std::fabs((double)ptr[k]);
+                }
+                MNN_PRINT("DEBUG %s pos-vs-neg: meanAbsDiff=%f meanAbsPos=%f ratio=%f (perBatch=%d)\n",
+                    label, sumAbsDiff / perBatch, sumAbsPos / perBatch,
+                    sumAbsPos > 0 ? (sumAbsDiff / sumAbsPos) : -1.0, perBatch);
+            };
+
             // ========== 步骤2: LLM特征桥接 ==========
             // Qwen3-0.6B输出 -> Connector -> Projector -> prompt_embeds
             auto llm_out = input_embeds;
+            debugBatchDivergence("llm_out(input_embeds)", llm_out);
 
             // Connector: 初步转换LLM特征
             MNN_PRINT("Running Connector...\n");
@@ -417,6 +437,7 @@ namespace MNN
                 return false;
             }
             auto connector_out = connector_res[0];
+            debugBatchDivergence("connector_out", connector_out);
 
             // Projector: 投影到Diffusion特征空间
             MNN_PRINT("Running Projector...\n");
@@ -427,6 +448,7 @@ namespace MNN
                 return false;
             }
             auto prompt_embeds = projector_res[0];
+            debugBatchDivergence("projector_out(prompt_embeds)", prompt_embeds);
 
             // Materialize prompt_embeds to a standalone constant so modules 0 and 1 can be safely freed
             {
@@ -642,6 +664,11 @@ namespace MNN
                     if (nPtr) {
                         MNN_PRINT("Step %d noise_pred: [%f, %f, %f, %f]\n", i + 1, nPtr[0], nPtr[1], nPtr[2], nPtr[3]);
                     }
+                }
+                {
+                    char label[32];
+                    snprintf(label, sizeof(label), "step%d noise_pred", i + 1);
+                    debugBatchDivergence(label, noise_pred);
                 }
 
                 // 应用CFG（Classifier-Free Guidance）

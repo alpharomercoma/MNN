@@ -334,6 +334,18 @@ public:
         for (int d : qInfo->dim) {
             qSize *= d;
         }
+        // DEBUG: full-tensor pos-vs-neg divergence at the LLM->DiT bridge input.
+        if (qInfo->dim.size() >= 3 && qInfo->dim[0] == 2) {
+            int perBatch = qSize / 2;
+            double sumAbsDiff = 0.0, sumAbsPos = 0.0;
+            for (int k = 0; k < perBatch; ++k) {
+                double d = (double)qPtr[k] - (double)qPtr[perBatch + k];
+                sumAbsDiff += std::fabs(d);
+                sumAbsPos += std::fabs((double)qPtr[k]);
+            }
+            MNN_PRINT("DEBUG query_var pos-vs-neg: meanAbsDiff=%f meanAbsPos=%f ratio=%f (perBatch=%d)\n",
+                sumAbsDiff / perBatch, sumAbsPos / perBatch, sumAbsPos > 0 ? (sumAbsDiff / sumAbsPos) : -1.0, perBatch);
+        }
         std::vector<float> copied(qPtr, qPtr + qSize);
         return _Const(copied.data(), qInfo->dim, qInfo->order, halide_type_of<float>());
     }
