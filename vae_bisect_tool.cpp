@@ -116,11 +116,29 @@ int main(int argc, const char* argv[]) {
                 auto ptr = host->host<float>();
                 int c = dims[1], hh = dims[2], ww = dims[3];
                 int spatial = hh * ww;
-                printf("  channel 0 grid (%dx%d):\n", hh, ww);
-                for (int y = 0; y < hh; ++y) {
-                    printf("   ");
-                    for (int x = 0; x < ww; ++x) printf("%8.4f", ptr[y * ww + x]);
-                    printf("\n");
+                // Find the worst (highest spatial-std) channel, not just channel 0 -- channel 0
+                // is not necessarily representative of whatever channel drives the tensor's
+                // extreme min/max.
+                int worstCi = 0;
+                float worstSd = -1.0f;
+                for (int ci = 0; ci < c; ++ci) {
+                    const float* base = ptr + (size_t)ci * spatial;
+                    double sum = 0;
+                    for (int k = 0; k < spatial; ++k) sum += base[k];
+                    double mean = sum / spatial;
+                    double sq = 0;
+                    for (int k = 0; k < spatial; ++k) { double d = base[k] - mean; sq += d * d; }
+                    float sd = std::sqrt(sq / spatial);
+                    if (sd > worstSd) { worstSd = sd; worstCi = ci; }
+                }
+                printf("  worst channel = %d (spatialStd=%f), grid (%dx%d):\n", worstCi, worstSd, hh, ww);
+                {
+                    const float* wbase = ptr + (size_t)worstCi * spatial;
+                    for (int y = 0; y < hh; ++y) {
+                        printf("   ");
+                        for (int x = 0; x < ww; ++x) printf("%8.4f", wbase[y * ww + x]);
+                        printf("\n");
+                    }
                 }
                 printf("  first 8 channel means (channel c's constant-if-correct value):\n   ");
                 for (int ci = 0; ci < std::min(c, 8); ++ci) {
@@ -130,6 +148,15 @@ int main(int argc, const char* argv[]) {
                     printf("%8.4f", sum / spatial);
                 }
                 printf("\n");
+                if (::getenv("VAE_DUMP_ALL_CHANNEL_MEANS")) {
+                    printf("  ALL %d channel means:\n", c);
+                    for (int ci = 0; ci < c; ++ci) {
+                        const float* base = ptr + (size_t)ci * spatial;
+                        double sum = 0;
+                        for (int k = 0; k < spatial; ++k) sum += base[k];
+                        printf("    ch%d: %f\n", ci, sum / spatial);
+                    }
+                }
             }
         }
         return true;

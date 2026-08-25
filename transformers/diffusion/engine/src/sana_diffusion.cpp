@@ -163,6 +163,12 @@ namespace MNN
                         lInfo->dim.size() > 2 ? lInfo->dim[2] : 0,
                         lInfo->dim.size() > 3 ? lInfo->dim[3] : 0,
                         pLat[0], pLat[10]);
+                    int n = 1; for (int d : lInfo->dim) n *= d;
+                    float mn = pLat[0], mx = pLat[0]; double sum = 0;
+                    for (int i = 0; i < n; ++i) { if (pLat[i] < mn) mn = pLat[i]; if (pLat[i] > mx) mx = pLat[i]; sum += pLat[i]; }
+                    double mean = sum / n; double sq = 0;
+                    for (int i = 0; i < n; ++i) { double dlt = pLat[i] - mean; sq += dlt * dlt; }
+                    MNN_PRINT("DENOISED FINAL LATENT STATS: min=%f max=%f mean=%f std=%f n=%d\n", mn, mx, (float)mean, (float)std::sqrt(sq / n), n);
                 }
             }
 
@@ -387,6 +393,18 @@ namespace MNN
                 {
                     MNN_ERROR("Error: VAE encoder returned null\n");
                     return false;
+                }
+                {
+                    auto rInfo = ref_latents->getInfo();
+                    auto rPtr = ref_latents->readMap<float>();
+                    if (rInfo && rPtr) {
+                        int n = 1; for (int d : rInfo->dim) n *= d;
+                        float mn = rPtr[0], mx = rPtr[0]; double sum = 0;
+                        for (int i = 0; i < n; ++i) { if (rPtr[i] < mn) mn = rPtr[i]; if (rPtr[i] > mx) mx = rPtr[i]; sum += rPtr[i]; }
+                        double mean = sum / n; double sq = 0;
+                        for (int i = 0; i < n; ++i) { double dlt = rPtr[i] - mean; sq += dlt * dlt; }
+                        MNN_PRINT("REAL ENCODED LATENT STATS: min=%f max=%f mean=%f std=%f n=%d\n", mn, mx, (float)mean, (float)std::sqrt(sq / n), n);
+                    }
                 }
 
                 if (mMemoryMode != 1)
@@ -628,7 +646,12 @@ namespace MNN
                 MNN_PRINT("Step %d/%d: t=%f\n", i + 1, num_inference_steps, t);
 
                 // Timestep：根据batch_size调整
-                std::vector<float> t_data(mask_batch, (float)t);
+                // TEMP DIAGNOSTIC: SANA_TIMESTEP_RAW_SIGMA feeds the model raw sigma [0,1]
+                // instead of sigma*1000, to test a timestep-scale-convention hypothesis. Does
+                // NOT affect `t`/`timesteps` (used for the Euler dt integration) -- only the
+                // value fed to the transformer's "timestep" input.
+                float modelTimestep = ::getenv("SANA_TIMESTEP_RAW_SIGMA") ? (float)(t / 1000.0) : (float)t;
+                std::vector<float> t_data(mask_batch, modelTimestep);
                 VARP timestep_var = _Const(t_data.data(), {mask_batch}, NCHW, halide_type_of<float>());
 
                 if (i == 0) {
