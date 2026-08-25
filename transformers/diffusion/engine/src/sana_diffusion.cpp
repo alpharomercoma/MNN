@@ -468,6 +468,31 @@ namespace MNN
             auto prompt_embeds = projector_res[0];
             debugBatchDivergence("projector_out(prompt_embeds)", prompt_embeds);
 
+            // DEBUG: dump the positive-branch (batch 0) prompt_embeds to a file so two separate
+            // runs with different prompts can be diffed externally. Env-gated, off by default.
+            if (const char* dumpPath = std::getenv("SANA_DUMP_PROMPT_EMBEDS")) {
+                auto info = prompt_embeds->getInfo();
+                auto ptr = prompt_embeds->readMap<float>();
+                if (info && ptr) {
+                    int perBatch = 1;
+                    for (size_t d = 1; d < info->dim.size(); ++d) perBatch *= info->dim[d];
+                    std::ofstream f(dumpPath, std::ios::binary);
+                    f.write(reinterpret_cast<const char*>(ptr), perBatch * sizeof(float));
+                    MNN_PRINT("DEBUG dumped prompt_embeds batch0 (%d floats) to %s\n", perBatch, dumpPath);
+                }
+            }
+            if (const char* dumpPath = std::getenv("SANA_DUMP_LLM_OUT")) {
+                auto info = llm_out->getInfo();
+                auto ptr = llm_out->readMap<float>();
+                if (info && ptr) {
+                    int perBatch = 1;
+                    for (size_t d = 1; d < info->dim.size(); ++d) perBatch *= info->dim[d];
+                    std::ofstream f(dumpPath, std::ios::binary);
+                    f.write(reinterpret_cast<const char*>(ptr), perBatch * sizeof(float));
+                    MNN_PRINT("DEBUG dumped llm_out(query_var) batch0 (%d floats) to %s\n", perBatch, dumpPath);
+                }
+            }
+
             // Materialize prompt_embeds to a standalone constant so modules 0 and 1 can be safely freed
             {
                 auto pInfo = prompt_embeds->getInfo();
