@@ -1497,6 +1497,7 @@ static inline int vocab_find(const std::vector<VocabEntry>& v, const char* s, ui
 class BPEModel : public TokenizerModel {
 public:
     bool use_byte_level_;
+    std::string end_of_word_suffix_;
     std::vector<StringRef> id_to_token_;
     std::vector<VocabEntry> sorted_vocab_;
     std::vector<std::pair<uint64_t, int>> sorted_merges_;
@@ -1513,10 +1514,11 @@ public:
     BPEModel(std::vector<StringRef>&& id_to_token,
              std::vector<VocabEntry>&& sorted_vocab,
              std::vector<std::pair<uint64_t, int>>&& merges,
-             bool use_byte_level)
+             bool use_byte_level,
+             std::string end_of_word_suffix = "")
         : id_to_token_(std::move(id_to_token)),
           sorted_vocab_(std::move(sorted_vocab)), sorted_merges_(std::move(merges)),
-          use_byte_level_(use_byte_level) {}
+          use_byte_level_(use_byte_level), end_of_word_suffix_(std::move(end_of_word_suffix)) {}
 
     int token_to_id(const std::string& token) const {
         return vocab_find(sorted_vocab_, token.c_str(), (uint16_t)token.size());
@@ -1562,6 +1564,25 @@ public:
                     }
                 }
                 off += ret;
+            }
+        }
+        // CLIP-style BPE fuses the end-of-word suffix onto the LAST initial symbol as one
+        // atomic unit (OpenAI's reference impl builds it as `word[-1] + "</w>"`, not as trailing
+        // symbols of its own), so e.g. a single-char word "a" starts BPE merging from one symbol
+        // "a</w>" rather than from "a" followed by separate "<", "/", "w", ">" symbols. Appending
+        // the suffix's bytes as their own trailing tokens (the first attempt at this) leaves them
+        // unmerged, since no merge rule pairs a whole word with four individual punctuation bytes.
+        if (!end_of_word_suffix_.empty() && !out.empty()) {
+            std::string fused = id_to_token(out.back()) + end_of_word_suffix_;
+            int fusedId = token_to_id(fused);
+            if (fusedId != -1) {
+                out.back() = fusedId;
+            } else if (use_byte_level_) {
+                static auto byte_map = create_bytes_char_map();
+                for (unsigned char b : end_of_word_suffix_) {
+                    int id = token_to_id(byte_map[b]);
+                    if (id != -1) out.push_back(id);
+                }
             }
         }
         while (out.size() > 1) {
@@ -2328,8 +2349,12 @@ bool PipelineTokenizer::load_vocab_binary(std::ifstream& file) {
                 uint32_t rank = read_u32(ptr);
                 merges.push_back({merge_key((int)id1, (int)id2), (int)rank});
             }
+            std::string end_of_word_suffix = read_str(ptr);
+            std::string continuing_subword_prefix = read_str(ptr);
+            (void)continuing_subword_prefix; // unused by any currently-exported .mtok
             model_ = make_unique_<BPEModel>(std::move(id_to_token),
-                std::move(sorted_vocab), std::move(merges), (bool)byte_level);
+                std::move(sorted_vocab), std::move(merges), (bool)byte_level,
+                std::move(end_of_word_suffix));
         } else if (type == 1) { // WordPiece
             std::string unk_token = read_str(ptr);
             std::string prefix = read_str(ptr);

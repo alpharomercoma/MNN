@@ -397,6 +397,12 @@ class LlmTokenizer(PreTrainedTokenizer):
                 for id1, id2, rank in merge_pairs:
                     fp.write(struct.pack('<III', id1, id2, rank))
 
+                # CLIP-style BPE seeds each word's merge with a trailing suffix (e.g. "</w>")
+                # before running merges, so a token resolves to its word-final vocab entry
+                # instead of a different, untrained-in-context mid-word entry with the same text.
+                fp.write(pack_str(model.get('end_of_word_suffix', '') or ''))
+                fp.write(pack_str(model.get('continuing_subword_prefix', '') or ''))
+
             elif mtype == 'WordPiece':
                 vocab = model.get('vocab', {})
                 unk_token = model.get('unk_token', '[UNK]')
