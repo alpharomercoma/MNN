@@ -37,13 +37,13 @@ int main(int argc, const char* argv[]) {
         MNN_PRINT("  height        : 输出图像高度（默认: 512，必须是32的倍数）\n");
         MNN_PRINT("  steps         : 推理步数（默认: 5，通过蒸馏可用较少步数获得高质量）\n");
         MNN_PRINT("  seed          : 随机种子（默认: 42）\n");
-        MNN_PRINT("  use_cfg       : 是否使用CFG引导, 0或1（默认: 0）\n");
-        MNN_PRINT("  cfg_scale     : CFG引导强度（默认: 4.5，仅use_cfg=1时生效）\n");
+        MNN_PRINT("  use_cfg       : 是否使用CFG引导, 0或1（默认: 1）\n");
+        MNN_PRINT("  cfg_scale     : CFG引导强度（默认: 15.0，仅use_cfg=1时生效）\n");
         MNN_PRINT("\n");
         MNN_PRINT("示例:\n");
-        MNN_PRINT("  文生图(512x512):  ./sana_diffusion_demo models text2img \"一只可爱的猫咪\" \"\" output.jpg 512 512 5 42 1 4.5\n");
-        MNN_PRINT("  文生图(1024x1024): ./sana_diffusion_demo models text2img \"一只可爱的猫咪\" \"\" output.jpg 1024 1024 5 42 1 4.5\n");
-        MNN_PRINT("  图像编辑:  ./sana_diffusion_demo models img2img \"添加彩虹\" input.jpg output.jpg 512 512 5 42 0 4.5\n");
+        MNN_PRINT("  文生图(512x512):  ./sana_diffusion_demo models text2img \"一只可爱的猫咪\" \"\" output.jpg 512 512 5 42 1 15.0\n");
+        MNN_PRINT("  文生图(1024x1024): ./sana_diffusion_demo models text2img \"一只可爱的猫咪\" \"\" output.jpg 1024 1024 5 42 1 15.0\n");
+        MNN_PRINT("  图像编辑:  ./sana_diffusion_demo models img2img \"添加彩虹\" input.jpg output.jpg 512 512 5 42 1 15.0\n");
         MNN_PRINT("=====================================================================================================================\n");
         return 0;
     }
@@ -57,8 +57,12 @@ int main(int argc, const char* argv[]) {
     int height = (argc > 7) ? atoi(argv[7]) : 512;
     int steps = (argc > 8) ? atoi(argv[8]) : 5;
     int seed = (argc > 9) ? atoi(argv[9]) : 42;
-    bool use_cfg = (argc > 10) ? (atoi(argv[10]) != 0) : false;
-    float cfg_scale = (argc > 11) ? atof(argv[11]) : 4.5f;
+    // Measured against vae_encoder() on a real photo: at use_cfg=0 (the old default) or
+    // cfg_scale=4.5, the denoised latent's std comes out around a third of a real encoded
+    // image's, i.e. under-converged flat noise. cfg_scale=15 was the lowest tested value that
+    // closed that gap.
+    bool use_cfg = (argc > 10) ? (atoi(argv[10]) != 0) : true;
+    float cfg_scale = (argc > 11) ? atof(argv[11]) : 15.0f;
     
     int memory_mode = 2; // standard，0:卸载
     int backend_type = MNN_FORWARD_CPU;
