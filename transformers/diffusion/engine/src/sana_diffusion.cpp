@@ -613,10 +613,17 @@ namespace MNN
             }
             else
             {
-                // 文生图模式：创建零ref_latents
+                // 文生图模式：a hard zero ref_latents blew up the transformer's own forward pass
+                // (raw noise_pred hit ~1e6 on step 1, then a NaN-derived address segfaulted step
+                // 2) -- exact zero has zero spatial variance, which some internal normalization
+                // apparently can't survive. Gaussian noise, matching how the real latent itself
+                // starts, keeps the same "no real image" semantics without that degenerate case.
                 int batch_for_ref = use_cfg ? 2 : 1;
-                ref_latents_batched = _Const(0.0f, {batch_for_ref, latent_channels, latent_h, latent_w}, NCHW);
-                MNN_PRINT("Created zero ref_latents for text2img mode: [%d, %d, %d, %d]\n",
+                std::vector<float> ref_noise(batch_for_ref * latent_channels * latent_h * latent_w);
+                for (size_t i = 0; i < ref_noise.size(); ++i)
+                    ref_noise[i] = normal(rng);
+                ref_latents_batched = _Const(ref_noise.data(), {batch_for_ref, latent_channels, latent_h, latent_w}, NCHW);
+                MNN_PRINT("Created noise ref_latents for text2img mode: [%d, %d, %d, %d]\n",
                           batch_for_ref, latent_channels, latent_h, latent_w);
             }
 
